@@ -1,0 +1,201 @@
+import sys
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from awsglue.utils import getResolvedOptions
+from awsglue.dynamicframe import DynamicFrame
+from pyspark.sql.functions import *
+
+# -----------------------------
+# INIT
+# -----------------------------
+args = getResolvedOptions(sys.argv, ['JOB_NAME'])
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+
+# -----------------------------
+# PATHS
+# -----------------------------
+SILVER_PATH = "s3://sri-s3-testing/Silver/"
+GOLD_PATH   = "s3://sri-s3-testing/Gold/"
+TEMP_PATH   = "s3://sri-s3-testing/temp/"
+
+# -----------------------------
+# REDSHIFT CONFIG
+# -----------------------------
+url = "jdbc:redshift://wg2502.666127452756.eu-west-2.redshift-serverless.amazonaws.com:5439/sri"
+user = "admin"
+password = "Passw0rd"
+
+# -----------------------------
+# READ SILVER
+# -----------------------------
+customers_df = spark.read.parquet(SILVER_PATH + "customers/")
+policies_df  = spark.read.parquet(SILVER_PATH + "policies/")
+claims_df    = spark.read.parquet(SILVER_PATH + "claims/")
+payments_df  = spark.read.parquet(SILVER_PATH + "payments/")
+
+# -----------------------------
+# FIX DATE FORMAT (PAYMENTS)
+# -----------------------------
+payments_df = payments_df.withColumn(
+    "payment_date",
+    to_date(col("payment_date"), "dd-MM-yyyy")
+)
+
+# -----------------------------
+# REMOVE DUPLICATES
+# -----------------------------
+customers_df = customers_df.dropDuplicates(["customer_id"])
+policies_df  = policies_df.dropDuplicates(["policy_id"])
+claims_df    = claims_df.dropDuplicates(["claim_id"])
+payments_df  = payments_df.dropDuplicates(["payment_id"])
+
+# -----------------------------
+# DIMENSIONS
+# -----------------------------
+dim_customer = customers_df \
+    .withColumn("customer_key", sha2(col("customer_id").cast("string"), 256)) \
+    .select(
+        "customer_key",
+        "customer_id",
+        "name",
+        "age",
+        "gender",
+        "city",
+        "occupation",
+        "credit_score"
+    )
+
+dim_policy = policies_df \
+    .withColumn("policy_key", sha2(col("policy_id").cast("string"), 256)) \
+    .select(
+        "policy_key",
+        "policy_id",
+        "customer_id",
+        "policy_type",
+        "start_date",
+        "end_date",
+        "premium_amount",
+        "policy_status"
+    )
+
+dim_date = claims_df.select(col("claim_date").alias("date")) \
+    .union(payments_df.select(col("payment_date").alias("date"))) \
+    .dropDuplicates(["date"]) \
+    .withColumn("year", year("date")) \
+    .withColumn("month", month("date")) \
+    .withColumn("date_key", date_format("date", "yyyyMMdd").cast("int"))
+
+# -----------------------------
+# ENRICH DATA
+# -----------------------------
+claims_enriched = claims_df.join(
+    policies_df.select("policy_id", "customer_id"),
+    "policy_id",
+    "left"
+)
+
+payments_enriched = payments_df \
+    .join(claims_df.select("claim_id", "policy_id"), "claim_id", "left") \
+    .join(policies_df.select("policy_id", "customer_id"), "policy_id", "left")
+
+# -----------------------------
+# FACT TABLES
+# -----------------------------
+fact_claims = claims_enriched \
+    .join(dim_customer, "customer_id", "left") \
+    .join(dim_policy, "policy_id", "left") \
+    .join(dim_date, claims_enriched["claim_date"] == dim_date["date"], "left") \
+    .select(
+        "claim_id",
+        "customer_key",
+        "policy_key",
+        "date_key",
+        "claim_amount",
+        "claim_status",
+        "incident_type",
+        "fraud_flag"
+    ) \
+    .dropDuplicates(["claim_id"])
+
+fact_payments = payments_enriched \
+    .join(dim_customer, "customer_id", "left") \
+    .join(dim_policy, "policy_id", "left") \
+    .join(dim_date, payments_enriched["payment_date"] == dim_date["date"], "left") \
+    .select(
+        "payment_id",
+        "customer_key",
+        "policy_key",
+        "date_key",
+        "payment_amount",
+        "payment_method"
+    ) \
+    .dropDuplicates(["payment_id"])
+
+fact_policies = policies_df \
+    .join(dim_customer, "customer_id", "left") \
+    .join(dim_date, policies_df["start_date"] == dim_date["date"], "left") \
+    .select(
+        "policy_id",
+        "customer_key",
+        "date_key",
+        "policy_type",
+        "premium_amount",
+        "policy_status",
+        "end_date"
+    ) \
+    .dropDuplicates(["policy_id"])
+
+# -----------------------------
+# WRITE GOLD (S3)
+# -----------------------------
+dim_customer.write.mode("overwrite").parquet(GOLD_PATH + "dim_customer/")
+dim_policy.write.mode("overwrite").parquet(GOLD_PATH + "dim_policy/")
+dim_date.write.mode("overwrite").parquet(GOLD_PATH + "dim_date/")
+
+fact_claims.write.mode("overwrite").parquet(GOLD_PATH + "fact_claims/")
+fact_payments.write.mode("overwrite").parquet(GOLD_PATH + "fact_payments/")
+fact_policies.write.mode("overwrite").parquet(GOLD_PATH + "fact_policies/")
+
+print("✅ GOLD LAYER WRITTEN")
+
+# -----------------------------
+# IDEMPOTENT LOAD FUNCTION
+# -----------------------------
+def load_to_redshift(df, table_name):
+    dyf = DynamicFrame.fromDF(df, glueContext, table_name)
+
+    glueContext.write_dynamic_frame.from_options(
+        frame=dyf,
+        connection_type="redshift",
+        connection_options={
+            "url": url,
+            "user": user,
+            "password": password,
+            "dbtable": table_name,
+            "redshiftTmpDir": TEMP_PATH,
+            "preactions": f"TRUNCATE TABLE {table_name};"
+        }
+    )
+
+# -----------------------------
+# LOAD TO REDSHIFT
+# -----------------------------
+load_to_redshift(dim_customer, "public.dim_customer")
+load_to_redshift(dim_policy, "public.dim_policy")
+load_to_redshift(dim_date, "public.dim_date")
+
+load_to_redshift(fact_claims, "public.fact_claims")
+load_to_redshift(fact_payments, "public.fact_payments")
+load_to_redshift(fact_policies, "public.fact_policies")
+
+print("✅ REDSHIFT LOAD COMPLETE (IDEMPOTENT)")
+
+# -----------------------------
+# COMMIT
+# -----------------------------
+job.commit()
