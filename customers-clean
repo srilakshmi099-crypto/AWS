@@ -1,0 +1,97 @@
+import sys
+from awsglue.transforms import *
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from awsglue.gluetypes import *
+from awsgluedq.transforms import EvaluateDataQuality
+from awsglue.dynamicframe import DynamicFrame
+from awsglue import DynamicFrame
+import re
+from pyspark.sql import functions as SqlFuncs
+
+def sparkSqlQuery(glueContext, query, mapping, transformation_ctx) -> DynamicFrame:
+    for alias, frame in mapping.items():
+        frame.toDF().createOrReplaceTempView(alias)
+    result = spark.sql(query)
+    return DynamicFrame.fromDF(result, glueContext, transformation_ctx)
+def _find_null_fields(ctx, schema, path, output, nullStringSet, nullIntegerSet, frame):
+    if isinstance(schema, StructType):
+        for field in schema:
+            new_path = path + "." if path != "" else path
+            output = _find_null_fields(ctx, field.dataType, new_path + field.name, output, nullStringSet, nullIntegerSet, frame)
+    elif isinstance(schema, ArrayType):
+        if isinstance(schema.elementType, StructType):
+            output = _find_null_fields(ctx, schema.elementType, path, output, nullStringSet, nullIntegerSet, frame)
+    elif isinstance(schema, NullType):
+        output.append(path)
+    else:
+        x, distinct_set = frame.toDF(), set()
+        for i in x.select(path).distinct().collect():
+            distinct_ = i[path.split('.')[-1]]
+            if isinstance(distinct_, list):
+                distinct_set |= set([item.strip() if isinstance(item, str) else item for item in distinct_])
+            elif isinstance(distinct_, str) :
+                distinct_set.add(distinct_.strip())
+            else:
+                distinct_set.add(distinct_)
+        if isinstance(schema, StringType):
+            if distinct_set.issubset(nullStringSet):
+                output.append(path)
+        elif isinstance(schema, IntegerType) or isinstance(schema, LongType) or isinstance(schema, DoubleType):
+            if distinct_set.issubset(nullIntegerSet):
+                output.append(path)
+    return output
+
+def drop_nulls(glueContext, frame, nullStringSet, nullIntegerSet, transformation_ctx) -> DynamicFrame:
+    nullColumns = _find_null_fields(frame.glue_ctx, frame.schema(), "", [], nullStringSet, nullIntegerSet, frame)
+    return DropFields.apply(frame=frame, paths=nullColumns, transformation_ctx=transformation_ctx)
+
+args = getResolvedOptions(sys.argv, ['JOB_NAME'])
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+
+# Default ruleset used by all target nodes with data quality enabled
+DEFAULT_DATA_QUALITY_RULESET = """
+    Rules = [
+        ColumnCount > 0
+    ]
+"""
+
+# Script generated for node Amazon S3
+
+
+# Script generated for node Amazon S3
+AmazonS3_node1775909453687 = glueContext.create_dynamic_frame.from_options(format_options={"quoteChar": "\"", "withHeader": True, "separator": ",", "optimizePerformance": False}, connection_type="s3", format="csv", connection_options={"paths": ["s3://sri-s3-testing/Bronze/toprocess/customers.csv"], "recurse": True}, transformation_ctx="AmazonS3_node1775909453687")
+
+# Script generated for node SQL Query
+SqlQuery26 = '''
+SELECT 
+    *, 
+    CAST(REGEXP_REPLACE(customer_id, 'C', '') AS INT) AS customer_id_new
+FROM customer
+'''
+SQLQuery_node1775910587562 = sparkSqlQuery(glueContext, query = SqlQuery26, mapping = {"customer":AmazonS3_node1775909453687}, transformation_ctx = "SQLQuery_node1775910587562")
+
+# Script generated for node Change Schema
+ChangeSchema_node1775914016491 = ApplyMapping.apply(frame=SQLQuery_node1775910587562, mappings=[("name", "string", "name", "string"), ("age", "string", "age", "int"), ("gender", "string", "gender", "string"), ("city", "string", "city", "string"), ("occupation", "string", "occupation", "string"), ("credit_score", "string", "credit_score", "int"), ("customer_id_new", "int", "customer_id", "int")], transformation_ctx="ChangeSchema_node1775914016491")
+
+# Script generated for node Filter
+Filter_node1775914112674 = Filter.apply(frame=ChangeSchema_node1775914016491, f=lambda row: (row["age"] >= 18 and row["age"] < 100), transformation_ctx="Filter_node1775914112674")
+
+# Script generated for node Drop Null Fields
+DropNullFields_node1775914842126 = drop_nulls(glueContext, frame=Filter_node1775914112674, nullStringSet={"NA"}, nullIntegerSet={}, transformation_ctx="DropNullFields_node1775914842126")
+
+# Script generated for node Drop Duplicates
+DropDuplicates_node1775915107043 =  DynamicFrame.fromDF(DropNullFields_node1775914842126.toDF().dropDuplicates(), glueContext, "DropDuplicates_node1775915107043")
+
+# Script generated for node Amazon S3
+EvaluateDataQuality().process_rows(frame=DropDuplicates_node1775915107043, ruleset=DEFAULT_DATA_QUALITY_RULESET, publishing_options={"dataQualityEvaluationContext": "EvaluateDataQuality_node1775913722053", "enableDataQualityResultsPublishing": True}, additional_options={"dataQualityResultsPublishing.strategy": "BEST_EFFORT", "observations.scope": "ALL"})
+glueContext.purge_s3_path("s3://sri-s3-testing/Silver/customers/", {"retentionPeriod": 0})
+AmazonS3_node1775915155074 = glueContext.write_dynamic_frame.from_options(frame=DropDuplicates_node1775915107043, connection_type="s3", format="glueparquet", connection_options={"path": "s3://sri-s3-testing/Silver/customers/", "partitionKeys": []}, format_options={"compression": "snappy"}, transformation_ctx="AmazonS3_node1775915155074")
+
+job.commit()
