@@ -1,0 +1,109 @@
+import sys
+from awsglue.transforms import *
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from awsgluedq.transforms import EvaluateDataQuality
+from awsglue.dynamicframe import DynamicFrame
+from awsglue import DynamicFrame
+from pyspark.sql import functions as SqlFuncs
+
+def sparkSqlQuery(glueContext, query, mapping, transformation_ctx) -> DynamicFrame:
+    for alias, frame in mapping.items():
+        frame.toDF().createOrReplaceTempView(alias)
+    result = spark.sql(query)
+    return DynamicFrame.fromDF(result, glueContext, transformation_ctx)
+def sparkAggregate(glueContext, parentFrame, groups, aggs, transformation_ctx) -> DynamicFrame:
+    aggsFuncs = []
+    for column, func in aggs:
+        aggsFuncs.append(getattr(SqlFuncs, func)(column))
+    result = parentFrame.toDF().groupBy(*groups).agg(*aggsFuncs) if len(groups) > 0 else parentFrame.toDF().agg(*aggsFuncs)
+    return DynamicFrame.fromDF(result, glueContext, transformation_ctx)
+
+args = getResolvedOptions(sys.argv, ['JOB_NAME'])
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+
+# Default ruleset used by all target nodes with data quality enabled
+DEFAULT_DATA_QUALITY_RULESET = """
+    Rules = [
+        ColumnCount > 0
+    ]
+"""
+
+# Script generated for node Amazon S3
+AmazonS3_node1776018846909 = glueContext.create_dynamic_frame.from_options(format_options={}, connection_type="s3", format="parquet", connection_options={"paths": ["s3://sri-s3-testing/Silver/customers/"], "recurse": True}, transformation_ctx="AmazonS3_node1776018846909")
+
+# Script generated for node SQL Query
+SqlQuery0 = '''
+SELECT *, 
+    CASE 
+        WHEN age < 30 THEN 'YOUNG'
+        WHEN age >= 30 AND age < 50 THEN 'MIDDLE'
+        ELSE 'SENIOR'
+    END AS age_group,
+    CASE 
+        WHEN credit_score >= 750 THEN 'HIGH'
+        WHEN credit_score >= 600 AND credit_score < 750 THEN 'MEDIUM'
+        ELSE 'LOW'
+    END AS credit_category,
+    UPPER(gender) as gender,
+    UPPER(city) as city,
+    UPPER(occupation) as occupation
+FROM myDataSource
+'''
+SQLQuery_node1776019035447 = sparkSqlQuery(glueContext, query = SqlQuery0, mapping = {"myDataSource":AmazonS3_node1776018846909}, transformation_ctx = "SQLQuery_node1776019035447")
+
+# Script generated for node Aggregate
+Aggregate_node1776020741548 = sparkAggregate(glueContext, parentFrame = SQLQuery_node1776019035447, groups = ["age_group"], aggs = [["customer_id", "count"]], transformation_ctx = "Aggregate_node1776020741548")
+
+# Script generated for node Aggregate
+Aggregate_node1776019865483 = sparkAggregate(glueContext, parentFrame = SQLQuery_node1776019035447, groups = ["city", "gender", "age_group", "credit_category", "occupation"], aggs = [["customer_id", "count"]], transformation_ctx = "Aggregate_node1776019865483")
+
+# Script generated for node Aggregate
+Aggregate_node1776021644802 = sparkAggregate(glueContext, parentFrame = SQLQuery_node1776019035447, groups = ["credit_category"], aggs = [["customer_id", "count"]], transformation_ctx = "Aggregate_node1776021644802")
+
+# Script generated for node Aggregate
+Aggregate_node1776021325704 = sparkAggregate(glueContext, parentFrame = SQLQuery_node1776019035447, groups = ["city"], aggs = [["customer_id", "count"]], transformation_ctx = "Aggregate_node1776021325704")
+
+# Script generated for node Rename Field
+RenameField_node1776020819345 = RenameField.apply(frame=Aggregate_node1776020741548, old_name="`count(customer_id)`", new_name="total_customers", transformation_ctx="RenameField_node1776020819345")
+
+# Script generated for node Rename Field
+RenameField_node1776020487284 = RenameField.apply(frame=Aggregate_node1776019865483, old_name="`count(customer_id)`", new_name="customer_count", transformation_ctx="RenameField_node1776020487284")
+
+# Script generated for node Rename Field
+RenameField_node1776021905163 = RenameField.apply(frame=Aggregate_node1776021644802, old_name="`count(customer_id)`", new_name="customer_count", transformation_ctx="RenameField_node1776021905163")
+
+# Script generated for node Rename Field
+RenameField_node1776021401549 = RenameField.apply(frame=Aggregate_node1776021325704, old_name="`count(customer_id)`", new_name="total_customers", transformation_ctx="RenameField_node1776021401549")
+
+# Script generated for node Amazon S3
+EvaluateDataQuality().process_rows(frame=RenameField_node1776020819345, ruleset=DEFAULT_DATA_QUALITY_RULESET, publishing_options={"dataQualityEvaluationContext": "EvaluateDataQuality_node1776018841826", "enableDataQualityResultsPublishing": True}, additional_options={"dataQualityResultsPublishing.strategy": "BEST_EFFORT", "observations.scope": "ALL"})
+AmazonS3_node1776021067598 = glueContext.getSink(path="s3://sri-s3-testing/Gold/age_categ/", connection_type="s3", updateBehavior="UPDATE_IN_DATABASE", partitionKeys=[], enableUpdateCatalog=True, transformation_ctx="AmazonS3_node1776021067598")
+AmazonS3_node1776021067598.setCatalogInfo(catalogDatabase="sri_insurance",catalogTableName="age_categ")
+AmazonS3_node1776021067598.setFormat("glueparquet", compression="snappy")
+AmazonS3_node1776021067598.writeFrame(RenameField_node1776020819345)
+# Script generated for node Amazon S3
+EvaluateDataQuality().process_rows(frame=RenameField_node1776020487284, ruleset=DEFAULT_DATA_QUALITY_RULESET, publishing_options={"dataQualityEvaluationContext": "EvaluateDataQuality_node1776018841826", "enableDataQualityResultsPublishing": True}, additional_options={"dataQualityResultsPublishing.strategy": "BEST_EFFORT", "observations.scope": "ALL"})
+AmazonS3_node1776020582748 = glueContext.getSink(path="s3://sri-s3-testing/Gold/customer_demographics/", connection_type="s3", updateBehavior="UPDATE_IN_DATABASE", partitionKeys=[], enableUpdateCatalog=True, transformation_ctx="AmazonS3_node1776020582748")
+AmazonS3_node1776020582748.setCatalogInfo(catalogDatabase="sri_insurance",catalogTableName="customer_Demographics")
+AmazonS3_node1776020582748.setFormat("glueparquet", compression="snappy")
+AmazonS3_node1776020582748.writeFrame(RenameField_node1776020487284)
+# Script generated for node Amazon S3
+EvaluateDataQuality().process_rows(frame=RenameField_node1776021905163, ruleset=DEFAULT_DATA_QUALITY_RULESET, publishing_options={"dataQualityEvaluationContext": "EvaluateDataQuality_node1776018841826", "enableDataQualityResultsPublishing": True}, additional_options={"dataQualityResultsPublishing.strategy": "BEST_EFFORT", "observations.scope": "ALL"})
+AmazonS3_node1776021945635 = glueContext.getSink(path="s3://sri-s3-testing/Gold/creditcateg/", connection_type="s3", updateBehavior="UPDATE_IN_DATABASE", partitionKeys=[], enableUpdateCatalog=True, transformation_ctx="AmazonS3_node1776021945635")
+AmazonS3_node1776021945635.setCatalogInfo(catalogDatabase="sri_insurance",catalogTableName="creditcateg")
+AmazonS3_node1776021945635.setFormat("glueparquet", compression="snappy")
+AmazonS3_node1776021945635.writeFrame(RenameField_node1776021905163)
+# Script generated for node Amazon S3
+EvaluateDataQuality().process_rows(frame=RenameField_node1776021401549, ruleset=DEFAULT_DATA_QUALITY_RULESET, publishing_options={"dataQualityEvaluationContext": "EvaluateDataQuality_node1776018841826", "enableDataQualityResultsPublishing": True}, additional_options={"dataQualityResultsPublishing.strategy": "BEST_EFFORT", "observations.scope": "ALL"})
+AmazonS3_node1776021455138 = glueContext.getSink(path="s3://sri-s3-testing/Gold/citycateg/", connection_type="s3", updateBehavior="UPDATE_IN_DATABASE", partitionKeys=[], enableUpdateCatalog=True, transformation_ctx="AmazonS3_node1776021455138")
+AmazonS3_node1776021455138.setCatalogInfo(catalogDatabase="sri_insurance",catalogTableName="citycateg")
+AmazonS3_node1776021455138.setFormat("glueparquet", compression="snappy")
+AmazonS3_node1776021455138.writeFrame(RenameField_node1776021401549)
+job.commit()
