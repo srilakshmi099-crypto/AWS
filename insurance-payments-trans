@@ -1,0 +1,96 @@
+import sys
+from awsglue.transforms import *
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from awsgluedq.transforms import EvaluateDataQuality
+from awsglue.dynamicframe import DynamicFrame
+from awsglue import DynamicFrame
+from pyspark.sql import functions as SqlFuncs
+
+def sparkSqlQuery(glueContext, query, mapping, transformation_ctx) -> DynamicFrame:
+    for alias, frame in mapping.items():
+        frame.toDF().createOrReplaceTempView(alias)
+    result = spark.sql(query)
+    return DynamicFrame.fromDF(result, glueContext, transformation_ctx)
+def sparkAggregate(glueContext, parentFrame, groups, aggs, transformation_ctx) -> DynamicFrame:
+    aggsFuncs = []
+    for column, func in aggs:
+        aggsFuncs.append(getattr(SqlFuncs, func)(column))
+    result = parentFrame.toDF().groupBy(*groups).agg(*aggsFuncs) if len(groups) > 0 else parentFrame.toDF().agg(*aggsFuncs)
+    return DynamicFrame.fromDF(result, glueContext, transformation_ctx)
+
+args = getResolvedOptions(sys.argv, ['JOB_NAME'])
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+
+# Default ruleset used by all target nodes with data quality enabled
+DEFAULT_DATA_QUALITY_RULESET = """
+    Rules = [
+        ColumnCount > 0
+    ]
+"""
+
+# Script generated for node Amazon S3
+AmazonS3_node1776028727066 = glueContext.create_dynamic_frame.from_options(format_options={}, connection_type="s3", format="parquet", connection_options={"paths": ["s3://sri-s3-testing/Silver/payments/"], "recurse": True}, transformation_ctx="AmazonS3_node1776028727066")
+
+# Script generated for node SQL Query
+SqlQuery1 = '''
+SELECT 
+    *,
+    CASE 
+        WHEN payment_amount < 5000 THEN 'LOW' 
+        WHEN payment_amount >= 5000 AND payment_amount < 18000 THEN 'MEDIUM' 
+        ELSE 'HIGH' 
+    END AS payment_category
+FROM myDataSource
+'''
+SQLQuery_node1776028887682 = sparkSqlQuery(glueContext, query = SqlQuery1, mapping = {"myDataSource":AmazonS3_node1776028727066}, transformation_ctx = "SQLQuery_node1776028887682")
+
+# Script generated for node SQL Query
+SqlQuery0 = '''
+SELECT *, 
+       year(payment_date) AS year, 
+       month(payment_date) AS month 
+FROM myDataSource
+'''
+SQLQuery_node1776030239078 = sparkSqlQuery(glueContext, query = SqlQuery0, mapping = {"myDataSource":SQLQuery_node1776028887682}, transformation_ctx = "SQLQuery_node1776030239078")
+
+# Script generated for node Aggregate
+Aggregate_node1776029122630 = sparkAggregate(glueContext, parentFrame = SQLQuery_node1776028887682, groups = ["payment_method"], aggs = [["payment_method", "count"]], transformation_ctx = "Aggregate_node1776029122630")
+
+# Script generated for node Aggregate
+Aggregate_node1776029594903 = sparkAggregate(glueContext, parentFrame = SQLQuery_node1776028887682, groups = ["payment_category"], aggs = [["payment_category", "count"]], transformation_ctx = "Aggregate_node1776029594903")
+
+# Script generated for node Aggregate
+Aggregate_node1776030289096 = sparkAggregate(glueContext, parentFrame = SQLQuery_node1776030239078, groups = ["year"], aggs = [["payment_amount", "sum"], ["payment_amount", "count"]], transformation_ctx = "Aggregate_node1776030289096")
+
+# Script generated for node Rename Field
+RenameField_node1776029338249 = RenameField.apply(frame=Aggregate_node1776029122630, old_name="`count(payment_method)`", new_name="total_payments", transformation_ctx="RenameField_node1776029338249")
+
+# Script generated for node Rename Field
+RenameField_node1776029660385 = RenameField.apply(frame=Aggregate_node1776029594903, old_name="`count(payment_category)`", new_name="total_payment", transformation_ctx="RenameField_node1776029660385")
+
+# Script generated for node Amazon S3
+EvaluateDataQuality().process_rows(frame=Aggregate_node1776030289096, ruleset=DEFAULT_DATA_QUALITY_RULESET, publishing_options={"dataQualityEvaluationContext": "EvaluateDataQuality_node1776028670026", "enableDataQualityResultsPublishing": True}, additional_options={"dataQualityResultsPublishing.strategy": "BEST_EFFORT", "observations.scope": "ALL"})
+AmazonS3_node1776030630495 = glueContext.getSink(path="s3://sri-s3-testing/Gold/yearlypaymentinfo/", connection_type="s3", updateBehavior="UPDATE_IN_DATABASE", partitionKeys=[], enableUpdateCatalog=True, transformation_ctx="AmazonS3_node1776030630495")
+AmazonS3_node1776030630495.setCatalogInfo(catalogDatabase="sri_insurance",catalogTableName="yearly_payment_info")
+AmazonS3_node1776030630495.setFormat("glueparquet", compression="snappy")
+AmazonS3_node1776030630495.writeFrame(Aggregate_node1776030289096)
+# Script generated for node Amazon S3
+EvaluateDataQuality().process_rows(frame=RenameField_node1776029338249, ruleset=DEFAULT_DATA_QUALITY_RULESET, publishing_options={"dataQualityEvaluationContext": "EvaluateDataQuality_node1776028670026", "enableDataQualityResultsPublishing": True}, additional_options={"dataQualityResultsPublishing.strategy": "BEST_EFFORT", "observations.scope": "ALL"})
+AmazonS3_node1776029434108 = glueContext.getSink(path="s3://sri-s3-testing/Gold/paymentmethod/", connection_type="s3", updateBehavior="UPDATE_IN_DATABASE", partitionKeys=[], enableUpdateCatalog=True, transformation_ctx="AmazonS3_node1776029434108")
+AmazonS3_node1776029434108.setCatalogInfo(catalogDatabase="sri_insurance",catalogTableName="paymentmethodcount")
+AmazonS3_node1776029434108.setFormat("glueparquet", compression="snappy")
+AmazonS3_node1776029434108.writeFrame(RenameField_node1776029338249)
+# Script generated for node Amazon S3
+EvaluateDataQuality().process_rows(frame=RenameField_node1776029660385, ruleset=DEFAULT_DATA_QUALITY_RULESET, publishing_options={"dataQualityEvaluationContext": "EvaluateDataQuality_node1776028670026", "enableDataQualityResultsPublishing": True}, additional_options={"dataQualityResultsPublishing.strategy": "BEST_EFFORT", "observations.scope": "ALL"})
+AmazonS3_node1776029714643 = glueContext.getSink(path="s3://sri-s3-testing/Gold/paymentcateg/", connection_type="s3", updateBehavior="UPDATE_IN_DATABASE", partitionKeys=[], enableUpdateCatalog=True, transformation_ctx="AmazonS3_node1776029714643")
+AmazonS3_node1776029714643.setCatalogInfo(catalogDatabase="sri_insurance",catalogTableName="paymentcateg")
+AmazonS3_node1776029714643.setFormat("glueparquet", compression="snappy")
+AmazonS3_node1776029714643.writeFrame(RenameField_node1776029660385)
+job.commit()
