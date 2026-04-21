@@ -1,0 +1,93 @@
+
+import sys
+import logging
+from awsglue.transforms import *
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from awsglue.dynamicframe import DynamicFrame  
+
+# -------------------------------
+#  Setup
+# -------------------------------
+args = getResolvedOptions(sys.argv, ['JOB_NAME'])
+
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+logger.info("Starting Glue Job")
+
+# -------------------------------
+#  Read from DynamoDB (FAST)
+# -------------------------------
+dynamodb_frame = glueContext.create_dynamic_frame.from_options(
+    connection_type="dynamodb",
+    connection_options={
+        "dynamodb.input.tableName": "claims-table",
+        "dynamodb.throughput.read.percent": "1.0",
+        "dynamodb.splits": "50"
+    },
+    transformation_ctx="dynamodb_frame"
+)
+
+logger.info(f"Record count: {dynamodb_frame.count()}")
+
+# -------------------------------
+#  Convert to DataFrame
+# -------------------------------
+df = dynamodb_frame.toDF()
+
+# -------------------------------
+#  Optional Transformations
+# -------------------------------
+# Example:
+# from pyspark.sql.functions import col
+# df = df.filter(col("claim_amount") > 0)
+
+# -------------------------------
+# Convert back to DynamicFrame (FIXED)
+# -------------------------------
+processed_frame = DynamicFrame.fromDF(df, glueContext, "processed_frame")
+
+# -------------------------------
+glueContext.purge_s3_path(
+    "s3://sri-s3-testing/Bronze/toprocess/claims/",
+    options={"retentionPeriod": 0}
+)
+
+# 📤 Write to S3
+# -------------------------------
+sink = glueContext.getSink(
+    path="s3://sri-s3-testing/Bronze/toprocess/claims/",
+    connection_type="s3",
+    updateBehavior="UPDATE_IN_DATABASE",
+    partitionKeys=[],  # add ["claim_date"] if available
+    enableUpdateCatalog=True,
+    transformation_ctx="s3_sink"
+)
+
+sink.setCatalogInfo(
+    catalogDatabase="sri_insurance",
+    catalogTableName="claim_parquet"
+)
+
+sink.setFormat("glueparquet", compression="snappy")
+
+sink.writeFrame(processed_frame)
+
+logger.info("Write completed")
+
+# -------------------------------
+# Commit Job
+# -------------------------------
+job.commit()
+
+logger.info("Glue Job Completed Successfully") 
