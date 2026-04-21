@@ -1,0 +1,181 @@
+{
+  "Comment": "A description of my state machine",
+  "StartAt": "Choice",
+  "States": {
+    "Choice": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Next": "Lambda Invoke",
+          "Variable": "$.Load_type",
+          "StringEquals": "FullLoad"
+        },
+        {
+          "Next": "Incremental Load &Clean",
+          "Variable": "$.Load_type",
+          "StringEquals": "IncrementalLoad"
+        }
+      ],
+      "Default": "Invalid DataLoad"
+    },
+    "Lambda Invoke": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "OutputPath": "$.Payload",
+      "Parameters": {
+        "Payload.$": "$",
+        "FunctionName": "arn:aws:lambda:eu-west-2:666127452756:function:sri_readplsql:$LATEST"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Data_FullLoad Fail"
+        }
+      ],
+      "Next": "Data_Cleaning"
+    },
+    "Data_FullLoad Fail": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:eu-west-2:666127452756:sri",
+        "Message": {
+          "status": "DataLoad fails"
+        }
+      },
+      "End": true
+    },
+    "Data_Cleaning": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "customers_Clean",
+          "States": {
+            "customers_Clean": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::glue:startJobRun.sync",
+              "Parameters": {
+                "JobName": "Insurance_Pipeline"
+              },
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "Policies_clean",
+          "States": {
+            "Policies_clean": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::glue:startJobRun.sync",
+              "Parameters": {
+                "JobName": "Insurance_Policies"
+              },
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "Claims_clean",
+          "States": {
+            "Claims_clean": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::glue:startJobRun.sync",
+              "Parameters": {
+                "JobName": "claims_clean"
+              },
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "Payments_clean",
+          "States": {
+            "Payments_clean": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::glue:startJobRun",
+              "Parameters": {
+                "JobName": "Insurance_payments"
+              },
+              "End": true
+            }
+          }
+        }
+      ],
+      "Next": "DataTransformation"
+    },
+    "DataTransformation": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "Insurance_trans"
+      },
+      "Next": "Succesfull Execution",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Data_TransformationFails"
+        }
+      ]
+    },
+    "Data_TransformationFails": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:eu-west-2:666127452756:sri",
+        "Message": {
+          "Message": "Data Transformation Failed"
+        }
+      },
+      "End": true
+    },
+    "Succesfull Execution": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:eu-west-2:666127452756:sri",
+        "Message": {
+          "status": "Execution done successfully"
+        }
+      },
+      "End": true
+    },
+    "Invalid DataLoad": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:eu-west-2:666127452756:sri",
+        "Message": {
+          "status": "Invalid dataload"
+        }
+      },
+      "End": true
+    },
+    "Incremental Load &Clean": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "claims_clean"
+      },
+      "Next": "DataTransformation"
+    }
+  },
+  "QueryLanguage": "JSONPath"
+}
