@@ -1,0 +1,72 @@
+import sys
+from awsglue.transforms import *
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from awsgluedq.transforms import EvaluateDataQuality
+from awsglue.dynamicframe import DynamicFrame
+import gs_derived
+from pyspark.sql import functions as SqlFuncs
+
+def sparkAggregate(glueContext, parentFrame, groups, aggs, transformation_ctx) -> DynamicFrame:
+    aggsFuncs = []
+    for column, func in aggs:
+        aggsFuncs.append(getattr(SqlFuncs, func)(column))
+    result = parentFrame.toDF().groupBy(*groups).agg(*aggsFuncs) if len(groups) > 0 else parentFrame.toDF().agg(*aggsFuncs)
+    return DynamicFrame.fromDF(result, glueContext, transformation_ctx)
+
+args = getResolvedOptions(sys.argv, ['JOB_NAME'])
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+
+# Default ruleset used by all target nodes with data quality enabled
+DEFAULT_DATA_QUALITY_RULESET = """
+    Rules = [
+        ColumnCount > 0
+    ]
+"""
+
+# Script generated for node Amazon S3
+AmazonS3_node1776163270395 = glueContext.create_dynamic_frame.from_options(format_options={}, connection_type="s3", format="parquet", connection_options={"paths": ["s3://sri-s3-testing/Silver/claims/"], "recurse": True}, transformation_ctx="AmazonS3_node1776163270395")
+
+# Script generated for node Derived Column
+DerivedColumn_node1776163681106 = AmazonS3_node1776163270395.gs_derived(colName="claim_category", expr="CASE      WHEN claim_amount < 5000 THEN 'LOW'     WHEN claim_amount >= 5000 AND claim_amount < 20000 THEN 'MEDIUM'     ELSE 'HIGH' END AS claim_category")
+
+# Script generated for node Derived Column
+DerivedColumn_node1776164301693 = DerivedColumn_node1776163681106.gs_derived(colName="fraud_status", expr="CASE      WHEN fraud_flag = 1 THEN 'FRAUD'     ELSE 'GENUINE' END AS fraud_status")
+
+# Script generated for node Aggregate
+Aggregate_node1776164725746 = sparkAggregate(glueContext, parentFrame = DerivedColumn_node1776164301693, groups = ["fraud_status"], aggs = [["claim_id", "count"]], transformation_ctx = "Aggregate_node1776164725746")
+
+# Script generated for node Derived Column
+DerivedColumn_node1776169087969 = DerivedColumn_node1776164301693.gs_derived(colName="year", expr="year(claim_date)")
+
+# Script generated for node Aggregate
+Aggregate_node1776164928177 = sparkAggregate(glueContext, parentFrame = DerivedColumn_node1776164301693, groups = ["claim_category"], aggs = [["claim_id", "count"]], transformation_ctx = "Aggregate_node1776164928177")
+
+# Script generated for node Aggregate
+Aggregate_node1776169389975 = sparkAggregate(glueContext, parentFrame = DerivedColumn_node1776169087969, groups = ["year"], aggs = [["claim_id", "count"]], transformation_ctx = "Aggregate_node1776169389975")
+
+# Script generated for node Amazon S3
+EvaluateDataQuality().process_rows(frame=Aggregate_node1776164725746, ruleset=DEFAULT_DATA_QUALITY_RULESET, publishing_options={"dataQualityEvaluationContext": "EvaluateDataQuality_node1776163216852", "enableDataQualityResultsPublishing": True}, additional_options={"dataQualityResultsPublishing.strategy": "BEST_EFFORT", "observations.scope": "ALL"})
+AmazonS3_node1776164801634 = glueContext.getSink(path="s3://sri-s3-testing/Gold/claimstatus/", connection_type="s3", updateBehavior="UPDATE_IN_DATABASE", partitionKeys=[], enableUpdateCatalog=True, transformation_ctx="AmazonS3_node1776164801634")
+AmazonS3_node1776164801634.setCatalogInfo(catalogDatabase="sri_insurance",catalogTableName="clsim_status")
+AmazonS3_node1776164801634.setFormat("glueparquet", compression="snappy")
+AmazonS3_node1776164801634.writeFrame(Aggregate_node1776164725746)
+# Script generated for node Amazon S3
+EvaluateDataQuality().process_rows(frame=Aggregate_node1776164928177, ruleset=DEFAULT_DATA_QUALITY_RULESET, publishing_options={"dataQualityEvaluationContext": "EvaluateDataQuality_node1776163216852", "enableDataQualityResultsPublishing": True}, additional_options={"dataQualityResultsPublishing.strategy": "BEST_EFFORT", "observations.scope": "ALL"})
+AmazonS3_node1776164961580 = glueContext.getSink(path="s3://sri-s3-testing/Gold/claimcateg/", connection_type="s3", updateBehavior="UPDATE_IN_DATABASE", partitionKeys=[], enableUpdateCatalog=True, transformation_ctx="AmazonS3_node1776164961580")
+AmazonS3_node1776164961580.setCatalogInfo(catalogDatabase="sri_insurance",catalogTableName="claim_categ")
+AmazonS3_node1776164961580.setFormat("glueparquet", compression="snappy")
+AmazonS3_node1776164961580.writeFrame(Aggregate_node1776164928177)
+# Script generated for node Amazon S3
+EvaluateDataQuality().process_rows(frame=Aggregate_node1776169389975, ruleset=DEFAULT_DATA_QUALITY_RULESET, publishing_options={"dataQualityEvaluationContext": "EvaluateDataQuality_node1776168952372", "enableDataQualityResultsPublishing": True}, additional_options={"dataQualityResultsPublishing.strategy": "BEST_EFFORT", "observations.scope": "ALL"})
+AmazonS3_node1776169576561 = glueContext.getSink(path="s3://sri-s3-testing/Gold/yearwiseclaims/", connection_type="s3", updateBehavior="UPDATE_IN_DATABASE", partitionKeys=[], enableUpdateCatalog=True, transformation_ctx="AmazonS3_node1776169576561")
+AmazonS3_node1776169576561.setCatalogInfo(catalogDatabase="sri_insurance",catalogTableName="year_wise_claims")
+AmazonS3_node1776169576561.setFormat("glueparquet", compression="snappy")
+AmazonS3_node1776169576561.writeFrame(Aggregate_node1776169389975)
+job.commit()
